@@ -10,16 +10,20 @@ BankRobbers = {}
 local updateTimer
 local updateInterval
 
+local knownRobbers = {}
+
 function BankRobbers.secure()
     return {
         updateTimer = updateTimer,
-        updateInterval = updateInterval
+        updateInterval = updateInterval,
+        knownRobbers = knownRobbers
     }
 end
 
 function BankRobbers.restore(data)
-    updateTimer = data.updateTimer
-    updateInterval = data.updateInterval
+    updateTimer = data.updateTimer or 0
+    updateInterval = data.updateInterval or 900
+    knownRobbers = data.knownRobbers or {}
 end
 
 function BankRobbers.getUpdateInterval()
@@ -33,6 +37,7 @@ end
 function BankRobbers.initialize()
     if onServer() then
         Sector():registerCallback("onRestoredFromDisk", "onRestoredFromDisk")
+        Sector():registerCallback("onDestroyed", "onEntityDestroyed")
     end
 end
 
@@ -104,6 +109,21 @@ function BankRobbers.updateServer(timeStep)
         return
     end
 
+    -- ADDED FIX: Check if there are already robbers alive in the sector
+    local existingRobbers = 0
+    local sectorShips = {Sector():getEntitiesByType(EntityType.Ship)}
+    
+    for _, ship in pairs(sectorShips) do
+        if ship:getValue("is_bank_robber") then
+            existingRobbers = existingRobbers + 1
+        end
+    end
+
+    -- If robbers are already here, abort the spawn and wait for the next timer cycle
+    if existingRobbers > 0 then
+        return
+    end
+
     -- Calculate how many pirates to send based on system bank's total value
     local shipCount = BankRobbers.getShipCount(totalBankValue)
 
@@ -164,4 +184,46 @@ function BankRobbers.onPiratesGenerated(generated)
 
     -- resolve intersections between generated ships
     Placer.resolveIntersections(generated)
+
+    -- ADDED FIX: Tag these specific ships so we can find them later
+    for _, ship in pairs(generated) do
+        knownRobbers[ship.index.string] = true
+        if valid(ship) then
+            ship:setValue("is_bank_robber", true)
+        end
+    end
+end
+
+-- == THE VACUUM SWEEP ==
+function BankRobbers.onEntityDestroyed(index, lastDamageInflictor)
+    local idString = index.string
+    
+    -- If it wasn't a robber, ignore it completely
+    if not knownRobbers[idString] then return end
+    knownRobbers[idString] = nil
+    
+    local entity = Sector():getEntity(index)
+    if entity and valid(entity) then
+        local pos = entity.translationf
+        -- Vacuum immediately, then again 0.5s later to catch delayed drops
+        BankRobbers.vacuumRobberLoot(pos.x, pos.y, pos.z)
+        deferredCallback(0.5, "vacuumRobberLoot", pos.x, pos.y, pos.z)
+    end
+end
+
+function BankRobbers.vacuumRobberLoot(x, y, z)
+    local sector = Sector()
+    
+    -- 1. Vacuum Loot (Turrets, Systems, Credits)
+    local loots = {sector:getEntitiesByType(EntityType.Loot)}
+    for _, loot in pairs(loots) do
+        if valid(loot) then
+            local lpos = loot.translationf
+            -- Use squared distance (1000 * 1000 = 1000000) for instant math
+            local distSq = (lpos.x - x)^2 + (lpos.y - y)^2 + (lpos.z - z)^2
+            if distSq < 1000000 then
+                sector:deleteEntity(loot)
+            end
+        end
+    end
 end

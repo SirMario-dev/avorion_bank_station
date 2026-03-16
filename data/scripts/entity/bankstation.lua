@@ -34,6 +34,16 @@ local btnUpgrade
 
 -- if this function returns false, the script will not be listed in the interaction window on the client,
 -- even though its UI may be registered
+function BankStation.formatNumber(number)
+    local formatted = tostring(math.floor(tonumber(number) or 0))
+    local k
+    while true do
+        formatted, k = string.gsub(formatted, "^(-?%d+)(%d%d%d)", '%1,%2')
+        if (k == 0) then break end
+    end
+    return formatted
+end
+
 function BankStation.interactionPossible(playerIndex, option)
     if Entity().factionIndex == Player().craftFaction.index then
         if Player().craftFaction.isAlliance then
@@ -49,20 +59,23 @@ function BankStation.interactionPossible(playerIndex, option)
     end
 end
 
-function BankStation.restore(data)
-    BankStation.storedMoney = data.storedMoney or 0
-    BankStation.upgradeLevel = data.upgradeLevel or 1
-end
-
 function BankStation.secure()
     local data = {}
     data.storedMoney = BankStation.storedMoney or 0
     data.upgradeLevel = BankStation.upgradeLevel or 1
+    data.timeUntilNextPayout = BankStation.timeUntilNextPayout or 300
     return data
 end
 
+function BankStation.restore(data)
+    BankStation.storedMoney = data.storedMoney or 0
+    BankStation.upgradeLevel = data.upgradeLevel or 1
+    BankStation.timeUntilNextPayout = data.timeUntilNextPayout or 300
+end
+
+-- Ensure the UI ticks every 1 second
 function BankStation.getUpdateInterval()
-    return 5 * 60
+    return 1
 end
 
 function BankStation.initialize()
@@ -108,9 +121,14 @@ end
 -- this function gets called on creation of the entity the script is attached to, on client only
 -- AFTER initialize above
 -- create all required UI elements for the client side
+local lblCapacityDetails
+local progressBar
+local lblInterestInfo
+local lblNextPayout
+
 function BankStation.initUI()
     local res = getResolution()
-    local size = vec2(780, 580)
+    local size = vec2(780, 270) -- Taller to fit the progress bar and timer!
 
     local menu = ScriptUI()
     window = menu:createWindow(Rect(res * 0.5 - size * 0.5, res * 0.5 + size * 0.5))
@@ -119,117 +137,151 @@ function BankStation.initUI()
     window.moveable = 1
     menu:registerWindow(window, "Banking Options" % _t, 10);
 
-    local hsplit = UIHorizontalSplitter(Rect(window.size), 10, 10, 0.2)
+    -- Use the Lister from BSE for clean vertical stacking
+    local lister = UIVerticalLister(Rect(vec2(15, 15), size - vec2(15, 15)), 10, 10)
 
-    -- Top Split -- Show Current Stored Amount
-    local bal_vSplit = UIVerticalMultiSplitter(hsplit.top, 10, 0, 2)
-    local bal_hSplit = UIHorizontalSplitter(bal_vSplit:partition(1), 10, 10, 0.5)
+    -- ROW 1: Capacity details
+    local capRect = lister:nextRect(20)
+    lblCapacityDetails = window:createLabel(capRect, "0 / 0 Cr", 16)
+    lblCapacityDetails:setCenterAligned()
 
-    window:createLabel(bal_hSplit.top, "Account Balance", 18)
-    lblBalance = window:createLabel(bal_hSplit.bottom, createMonetaryString(BankStation.storedMoney) .. " Cr" % _t, 14)
-    lblBalance:setRightAligned()
+    -- ROW 2: Progress Bar
+    local barRect = lister:nextRect(20)
+    window:createFrame(barRect)
+    progressBar = window:createProgressBar(barRect, ColorRGB(0.2, 0.6, 1.0))
 
-    -- Bottom Split -- Show Deposit/Withdrawl Options
-    local options_vSplit = UIVerticalMultiSplitter(hsplit.bottom, 2, 0, 3)
-    local options_hSplit1 = UIHorizontalMultiSplitter(options_vSplit:partition(1), 2, 2, 2)
-    local options_hSplit2 = UIHorizontalMultiSplitter(options_vSplit:partition(2), 2, 2, 2)
+    -- ROW 3: Interest Info
+    local infoRect = lister:nextRect(20)
+    lblInterestInfo = window:createLabel(infoRect, "Interest Rate: 2% every 5 Minutes", 14)
+    lblInterestInfo:setCenterAligned()
+    lblInterestInfo.color = ColorRGB(0.5, 0.8, 1.0)
 
-    -- Deposit Text Box Background Frame
-    local frame = window:createFrame(options_hSplit1:partition(0))
-    frame.width = 180
-    frame.height = 30
+    lister:nextRect(10) -- Spacer
 
-    -- Deposit Text Box
-    txtDeposit = window:createTextBox(options_hSplit1:partition(0), "onDepositBoxChange")
-    txtDeposit.width = 180
-    txtDeposit.height = 30
+    -- ROW 4: 3-Column Actions
+    local options_vSplit = UIVerticalMultiSplitter(lister:nextRect(60), 20, 0, 3)
+    
+    -- Column 1: Deposit
+    local dep_split = UIHorizontalSplitter(options_vSplit:partition(0), 10, 0, 0.5)
+    window:createFrame(dep_split.top) 
+    txtDeposit = window:createTextBox(dep_split.top, "onDepositBoxChange")
     txtDeposit.text = "0"
-    txtDeposit.allowedCharacters = "0123456789"
+    -- THE FIX: Added the comma here!
+    txtDeposit.allowedCharacters = "0123456789,"
     txtDeposit.clearOnClick = 1
-
-    -- Deposit Button
-    local btnDeposit = window:createButton(options_hSplit2:partition(0), "Deposit (Store)", "onBtnDepositClick")
+    local btnDeposit = window:createButton(dep_split.bottom, "Deposit (Store)", "onBtnDepositClick")
     btnDeposit.maxTextSize = 14
-    btnDeposit.width = 150
-    btnDeposit.height = 30
 
-    -- Deposit Text Box Background Frame
-    local frame = window:createFrame(options_hSplit1:partition(1))
-    frame.width = 180
-    frame.height = 30
-
-    -- Deposit Text Box
-    txtWithdraw = window:createTextBox(options_hSplit1:partition(1), "onWithdrawBoxChange")
-    txtWithdraw.width = 180
-    txtWithdraw.height = 30
+    -- Column 2: Withdraw
+    local wit_split = UIHorizontalSplitter(options_vSplit:partition(1), 10, 0, 0.5)
+    window:createFrame(wit_split.top) 
+    txtWithdraw = window:createTextBox(wit_split.top, "onWithdrawBoxChange")
     txtWithdraw.text = "0"
-    txtWithdraw.allowedCharacters = "0123456789"
+    -- THE FIX: Added the comma here!
+    txtWithdraw.allowedCharacters = "0123456789,"
     txtWithdraw.clearOnClick = 1
-
-    -- Deposit Button
-    local btnWithdraw = window:createButton(options_hSplit2:partition(1), "Withdraw (Take)", "onBtnWithdrawClick")
+    local btnWithdraw = window:createButton(wit_split.bottom, "Withdraw (Take)", "onBtnWithdrawClick")
     btnWithdraw.maxTextSize = 14
-    btnWithdraw.width = 150
-    btnWithdraw.height = 30
 
-    -- Upgrade Button
-    local upgradeHsplit = UIHorizontalMultiSplitter(options_hSplit1:partition(2), 0, 5, 3)
-    lblUpgrade = window:createLabel(upgradeHsplit:partition(0), "Upgrade Price:", 14)
-    lblUpgrade:setCenterAligned()
-
-    lblUpgradePrice = window:createLabel(upgradeHsplit:partition(1), "${price} Cr" % _t % {
-        price = createMonetaryString(upgradePrices[BankStation.upgradeLevel + 1] * 1000000)
-    }, 14)
-    lblUpgradePrice:setRightAligned()
-
-    local upgradebtnHsplit = UIHorizontalMultiSplitter(options_hSplit2:partition(2), 0, 0, 3)
-    btnUpgrade = window:createButton(upgradebtnHsplit:partition(1), "Upgrade" % _t, "onUpgradeButtonPressed")
+    -- Column 3: Upgrade
+    local upg_split = UIHorizontalSplitter(options_vSplit:partition(2), 10, 0, 0.45)
+    local upg_lister = UIVerticalLister(upg_split.top, 2, 0)
+    
+    lblUpgradePrice = window:createLabel(upg_lister:nextRect(14), "Cost: --", 12)
+    lblUpgradePrice:setCenterAligned()
+    
+    lblUpgradeEffect = window:createLabel(upg_lister:nextRect(14), "Cap: --", 12)
+    lblUpgradeEffect:setCenterAligned()
+    lblUpgradeEffect.color = ColorRGB(0.5, 0.8, 1.0) 
+    
+    btnUpgrade = window:createButton(upg_split.bottom, "Upgrade Vault", "onUpgradeButtonPressed")
     btnUpgrade.maxTextSize = 14
-    btnUpgrade.width = 150
-    btnUpgrade.height = 30
 
+    lister:nextRect(10) -- Spacer
+
+    -- ROW 5: Timer Footer
+    local footerRect = lister:nextRect(20)
+    lblNextPayout = window:createLabel(footerRect, "Next Payout: 05:00", 14)
+    lblNextPayout:setCenterAligned()
 end
 
 function BankStation.onShowWindow(isSync)
-    -- On Window Shown
-    if isSync ~= nil then
+    if isSync ~= false then
         invokeServerFunction("sync")
     end
 
-    if lblBalance then
-        lblBalance.caption = createMonetaryString(BankStation.storedMoney) .. " Cr" % _t
+    local maxMoney = maxBalances[BankStation.upgradeLevel] * 1000000
+    local current = math.floor(BankStation.storedMoney)
+
+    if lblCapacityDetails then
+        lblCapacityDetails.caption = "Current Balance: " .. createMonetaryString(current) .. " / " .. createMonetaryString(maxMoney) .. " Cr"
     end
 
-    if lblUpgradePrice and BankStation.upgradeLevel < 6 then
-        lblUpgradePrice.caption = "${price} Cr" % _t % {
-            price = createMonetaryString(upgradePrices[BankStation.upgradeLevel + 1] * 1000000)
-        }
-    else
-        lblUpgrade:hide()
-        lblUpgradePrice:hide()
-        btnUpgrade:hide()
+    if progressBar then
+        progressBar.progress = math.min(1.0, current / maxMoney)
+        progressBar.color = (progressBar.progress > 0.9) and ColorRGB(1, 0.2, 0.2) or ColorRGB(0.2, 0.6, 1)
     end
 
+    if lblUpgradePrice and lblUpgradeEffect then
+        if BankStation.upgradeLevel < #upgradePrices then
+            local nextPrice = upgradePrices[BankStation.upgradeLevel + 1] * 1000000
+            local nextCap = maxBalances[BankStation.upgradeLevel + 1] * 1000000
+            
+            lblUpgradePrice.caption = "Cost: " .. createMonetaryString(nextPrice) .. " Cr"
+            lblUpgradeEffect.caption = "New Cap: " .. createMonetaryString(nextCap) .. " Cr"
+            
+            lblUpgradePrice:show()
+            lblUpgradeEffect:show()
+            btnUpgrade:show()
+            
+            local tooltip = "Level " .. (BankStation.upgradeLevel + 1) .. " Benefits:\n- Max Capacity: " .. createMonetaryString(nextCap) .. " Cr"
+            btnUpgrade.tooltip = tooltip
+        else
+            lblUpgradePrice.caption = "Max Level"
+            lblUpgradeEffect.caption = "Reached"
+            btnUpgrade:hide()
+        end
+    end
 end
 
 function BankStation.update(timeStep)
     if onServer() then
-        if BankStation.storedMoney > 0 then
-            local interest = math.floor(BankStation.storedMoney * interestPercent)
-            BankStation.storedMoney = BankStation.storedMoney + interest
+        BankStation.timeUntilNextPayout = (BankStation.timeUntilNextPayout or 300) - timeStep
 
-            local maxMoney = maxBalances[BankStation.upgradeLevel] * 1000000
-            if BankStation.storedMoney >= maxMoney then
-                local overflow = BankStation.storedMoney - maxMoney
-                BankStation.storedMoney = maxMoney
-                Faction():receive("Received %1% Credits: Bank Interest Overflow." % _T, overflow)
+        if BankStation.timeUntilNextPayout <= 0 then
+            BankStation.timeUntilNextPayout = 300
+            
+            if BankStation.storedMoney > 0 then
+                local interestPercent = 0.02
+                local interest = math.floor(BankStation.storedMoney * interestPercent)
+                BankStation.storedMoney = BankStation.storedMoney + interest
+
+                local maxMoney = maxBalances[BankStation.upgradeLevel] * 1000000
+                if BankStation.storedMoney >= maxMoney then
+                    local overflow = BankStation.storedMoney - maxMoney
+                    BankStation.storedMoney = maxMoney
+                    if overflow > 0 then
+                        Faction():receive("Received %1% Credits: Bank Interest Overflow."%_T, overflow)
+                    end
+                end
+
+                Faction():sendChatMessage(Entity(), ChatMessageType.Chatter, "Earned %1% credits in interest."%_T, createMonetaryString(interest))
             end
-
-            Faction():sendChatMessage(Entity(), ChatMessageType.Chatter, "Earned %1% credits in interest." % _T,
-                createMonetaryString(interest))
+            
+            broadcastInvokeClientFunction("sync", BankStation.secure())
         end
+
     elseif onClient() then
-        invokeServerFunction("sync")
+        BankStation.timeUntilNextPayout = (BankStation.timeUntilNextPayout or 300) - timeStep
+        if BankStation.timeUntilNextPayout < 0 then BankStation.timeUntilNextPayout = 0 end
+
+        if window and window.visible then
+            if lblNextPayout then
+                local mins = math.floor(BankStation.timeUntilNextPayout / 60)
+                local secs = math.floor(BankStation.timeUntilNextPayout % 60)
+                lblNextPayout.caption = string.format("Next Payout: %02d:%02d", mins, secs)
+            end
+        end
     end
 end
 
@@ -275,28 +327,33 @@ function BankStation.onDestroyed(index, lastDamageInflictor)
 end
 
 -- UI Event Functions
-function BankStation.onWithdrawBoxChange(box)
-    local enteredNumber = tonumber(box.text) or 0
-    if enteredNumber >= BankStation.storedMoney then
-        enteredNumber = BankStation.storedMoney
-    end
-    box.text = enteredNumber
-end
-callable(BankStation, "onWithdrawBoxChange")
-
 function BankStation.onDepositBoxChange(box)
-    local enteredNumber = tonumber(box.text) or 0
+    local rawText = string.gsub(box.text, ",", "") -- Strip commas for math
+    local enteredNumber = tonumber(rawText) or 0
+    
     local maxMoney = maxBalances[BankStation.upgradeLevel] * 1000000
     if (BankStation.storedMoney + enteredNumber) >= maxMoney then
         enteredNumber = maxMoney - BankStation.storedMoney
     end
-    box.text = enteredNumber
+    
+    box.text = BankStation.formatNumber(enteredNumber) -- Put commas back!
 end
-callable(BankStation, "onDepositBoxChange")
+
+function BankStation.onWithdrawBoxChange(box)
+    local rawText = string.gsub(box.text, ",", "")
+    local enteredNumber = tonumber(rawText) or 0
+    
+    if enteredNumber >= BankStation.storedMoney then
+        enteredNumber = BankStation.storedMoney
+    end
+    
+    box.text = BankStation.formatNumber(enteredNumber)
+end
 
 function BankStation.onBtnDepositClick(depositAmount)
     if onClient() then
-        local depositAmount = tonumber(txtDeposit.text) or 0
+        local rawText = string.gsub(txtDeposit.text, ",", "")
+        depositAmount = tonumber(rawText) or 0
         invokeServerFunction("onBtnDepositClick", depositAmount)
         return
     end
@@ -332,7 +389,8 @@ callable(BankStation, "onBtnDepositClick")
 
 function BankStation.onBtnWithdrawClick(withdrawAmount)
     if onClient() then
-        local withdrawAmount = tonumber(txtWithdraw.text) or 0
+        local rawText = string.gsub(txtWithdraw.text, ",", "")
+        withdrawAmount = tonumber(rawText) or 0
         invokeServerFunction("onBtnWithdrawClick", withdrawAmount)
         return
     end
@@ -361,32 +419,39 @@ function BankStation.onUpgradeButtonPressed()
         return
     end
 
-    local buyer, _, player = getInteractingFaction(callingPlayer, AlliancePrivilege.SpendResources,
-        AlliancePrivilege.ManageStations)
-    if not buyer then
-        return
-    end
+    local buyer, _, player = getInteractingFaction(callingPlayer, AlliancePrivilege.SpendResources, AlliancePrivilege.ManageStations)
+    if not buyer then return end
 
-    if upgradeLevel == 5 then
-        player:sendChatMessage("", ChatMessageType.Error, "This station cannot be upgraded farther." % _t)
+    if BankStation.upgradeLevel >= #upgradePrices then
+        player:sendChatMessage("", ChatMessageType.Error, "This station cannot be upgraded further." % _t)
         return
     end
 
     local price = upgradePrices[BankStation.upgradeLevel + 1] * 1000000
-
     local canPay, msg, args = buyer:canPay(price)
-    if not canPay then -- if there was an error, print it
+    
+    if not canPay then
         player:sendChatMessage(Entity(), 1, msg, unpack(args))
         return
     end
 
-    buyer:pay(price)
-
+    buyer:pay("Vault Upgrade: %1% Credits"%_T, price)
     BankStation.upgradeLevel = BankStation.upgradeLevel + 1
-
     BankStation:sync()
 end
 callable(BankStation, "onUpgradeButtonPressed")
+
+function BankStation.onCustomPayChange(box)
+    local rawText = string.gsub(box.text, ",", "")
+    local entered = tonumber(rawText) or 0
+    
+    if selectedActiveLoanIndex then
+        local loan = BankStation.activeLoans[selectedActiveLoanIndex]
+        if entered > loan.repayment then entered = loan.repayment end
+    end
+    
+    box.text = BankStation.formatNumber(entered)
+end
 
 -- This is called right before the Entity leaves a sector due to a jump
 function BankStation.onJump(shipIndex, x, y)
